@@ -1,0 +1,43 @@
+# =============================================================================
+# Lead Intelligence System — Python Dependencies
+# Install: pip install -r requirements.txt
+# Python 3.11+ required
+# =============================================================================
+
+# --- Database ---
+supabase==2.10.0
+
+# --- Scraping ---
+playwright==1.49.0
+requests==2.32.3
+httpx>=0.26,<0.28
+
+# --- Scheduling ---
+APScheduler==3.10.4
+
+# --- Config ---
+python-dotenv==1.0.1
+
+# --- Notifications ---
+twilio==9.4.0
+sendgrid==6.11.0
+
+# --- Address validation ---
+usaddress==0.5.10
+
+# --- PDF parsing (Cuyahoga annual delinquent tax list) ---
+pdfplumber>=0.11.0
+
+# --- Excel parsing (Lake County delinquent taxpayer report from Karen) ---
+openpyxl>=3.1.0
+
+# --- CAPTCHA solving (Mahoning County reCAPTCHA v2) ---
+2captcha-python>=1.2.1
+
+# --- Google Sheets (VA queue routing) ---
+gspread==6.1.4
+google-auth==2.37.0
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.24.0

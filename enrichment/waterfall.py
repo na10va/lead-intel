@@ -1,0 +1,109 @@
+"""
+enrichment/waterfall.py — Master enrichment controller.
+
+Runs Step 1 → 2 → 3 in strict order. Escalates to the next step only
+when the previous step fails to return a verified mobile phone number.
+Never skip steps. Never run Step 2 or 3 if Step 1 already returned a valid mobile.
+
+Step 1: Free Ohio public sources (county auditor, USPS, Ohio SOS)
+Step 2: Skip Sherpa API (pay-per-call — only if Step 1 found no mobile)
+Step 3: Skip Matrix flag (manual only — only for Tier A where Steps 1+2 failed)
+"""
+
+from db.client import get_client, update_row
+from utils.logger import get_logger
+
+log = get_logger("enrichment.waterfall")
+
+
+def enrich_lead(lead_id: str) -> bool:
+    """Run the full enrichment waterfall for a single lead.
+
+    Args:
+        lead_id: UUID of the raw_leads row to enrich.
+
+    Returns True if enrichment produced a verified mobile number.
+    Returns False if all steps failed (lead is flagged for Skip Matrix if Tier A).
+    """
+    from enrichment.public_sources import run_public_sources
+    from enrichment.skip_sherpa import run_skip_sherpa
+    from enrichment.skip_matrix_flag import flag_for_skip_matrix
+
+    client = get_client()
+    lead = client.table("raw_leads").select("*").eq("id", lead_id).single().execute().data
+
+    if not lead:
+        log.error(f"Lead {lead_id} not found in raw_leads")
+        return False
+
+    if lead.get("enriched"):
+        log.debug(f"Lead {lead_id} already enriched — skipping")
+        return bool(lead.get("phone_1"))
+
+    # Step 1 — Free Ohio public sources
+    log.info(f"Enrichment Step 1 (public sources) for lead {lead_id}")
+    step1_result = run_public_sources(lead)
+
+    if step1_result.get("mobile_found"):
+        _apply_enrichment(lead_id, step1_result, step=1)
+        log.info(f"Lead {lead_id} enriched at Step 1 — mobile found")
+        return True
+
+    _apply_enrichment(lead_id, step1_result, step=1, partial=True)
+
+    # Step 2 — Skip Sherpa API
+    from enrichment.skip_sherpa import SKIP_SHERPA_AVAILABLE
+    if not SKIP_SHERPA_AVAILABLE:
+        log.warning(f"Skip Sherpa not configured — skipping Step 2 for lead {lead_id}")
+    else:
+        log.info(f"Enrichment Step 2 (Skip Sherpa) for lead {lead_id}")
+        step2_result = run_skip_sherpa(lead)
+
+        if step2_result.get("mobile_found"):
+            _apply_enrichment(lead_id, step2_result, step=2)
+            log.info(f"Lead {lead_id} enriched at Step 2 — mobile found")
+            return True
+
+    # Step 3 — Skip Matrix flag (Tier A only, manual)
+    lead_tier = lead.get("tier")
+    if lead_tier == "A":
+        log.info(f"Lead {lead_id} is Tier A with no mobile — flagging for Skip Matrix")
+        flag_for_skip_matrix(lead_id)
+
+    update_row("raw_leads", lead_id, {
+        "enriched": True,
+        "enriched_at": "now()",
+        "verification_notes": (
+            (lead.get("verification_notes") or "") +
+            " | Enrichment: no mobile found after Steps 1+2"
+        ).strip(" | "),
+    })
+
+    log.warning(f"Lead {lead_id} — no mobile found after all enrichment steps")
+    return False
+
+
+def _apply_enrichment(lead_id: str, result: dict, step: int, partial: bool = False) -> None:
+    """Write enrichment results to raw_leads and trigger Gate 2 verification."""
+    from verification.verify_enrichment import verify_enriched_record
+
+    updates = {
+        "enriched": True,
+        "enrichment_step": step,
+        "enriched_at": "now()",
+    }
+
+    for field in ["phone_1", "phone_2", "phone_3", "owner_email",
+                  "owner_mailing_address", "owner_out_of_state",
+                  "estimated_value", "estimated_equity_pct",
+                  "last_sale_date", "last_sale_price"]:
+        if result.get(field) is not None:
+            updates[field] = result[field]
+
+    if result.get("equity_unknown"):
+        updates["equity_unknown"] = True
+
+    update_row("raw_leads", lead_id, updates)
+
+    if not partial:
+        verify_enriched_record(lead_id)

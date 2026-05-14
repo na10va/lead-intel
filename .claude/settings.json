@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:probate.mahoningcountyoh.gov)",
+      "WebFetch(domain:portal-ohmahoning.tylertech.cloud)",
+      "WebFetch(domain:www.courtlistener.com)",
+      "WebFetch(domain:data.clevelandohio.gov)"
+    ]
+  }
+}
