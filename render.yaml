@@ -5,11 +5,11 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: PYTHONPATH=/opt/render/project/src python routing/webhook_server.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
         sync: false
       - key: WEBHOOK_API_KEY
         sync: false
-      - key: PYTHON_VERSION
-        value: 3.11.0
