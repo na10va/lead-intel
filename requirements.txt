@@ -11,6 +11,8 @@ supabase==2.10.0
 playwright==1.49.0
 requests==2.32.3
 httpx>=0.26,<0.28
+beautifulsoup4>=4.12.0
+anthropic>=0.40.0        # optional — enables Claude-powered selector repair in self_healer.py
 
 # --- Scheduling ---
 APScheduler==3.10.4

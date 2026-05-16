@@ -76,14 +76,17 @@ def validate_address_usps(address: str) -> Optional[dict]:
     raise NotImplementedError("USPS address validation not yet implemented")
 
 
-def lookup_county_auditor(owner_name: str, property_address: str, county: str) -> dict:
-    """Look up owner mailing address from the county auditor property search.
+def lookup_county_auditor(property_address: str, county: str, lead: dict = None) -> dict:
+    """Look up property value and last sale data from the county auditor GIS.
 
-    TODO: Implement per-county auditor scraping.
-    Returns dict with owner_mailing_address and any additional owner details.
-    These are public portals — no auth required, but add 2s delay between requests.
+    Delegates to enrichment/county_auditor.py which implements all three Ohio counties
+    via public ArcGIS REST APIs. Returns estimated_value, last_sale_date, last_sale_price.
     """
-    raise NotImplementedError(f"County auditor lookup not yet implemented for {county}")
+    from enrichment.county_auditor import enrich_lead as _ca_enrich
+    if lead is None:
+        lead = {"property_address": property_address, "county": county, "id": "unknown"}
+    result = _ca_enrich(lead)
+    return result or {}
 
 
 def lookup_ohio_sos(owner_name: str) -> Optional[dict]:
@@ -119,7 +122,7 @@ def run_public_sources(lead: dict) -> dict:
 
     # County auditor lookup
     try:
-        auditor_data = lookup_county_auditor(owner_name, property_address, county)
+        auditor_data = lookup_county_auditor(property_address, county, lead=lead)
         result.update(auditor_data)
     except NotImplementedError:
         log.debug(f"County auditor lookup not implemented for {county}")

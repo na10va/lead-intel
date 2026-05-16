@@ -92,6 +92,16 @@ def step_gate1_verification() -> None:
         log.error(f"Gate 1 verification failed: {e}")
 
 
+def step_county_auditor() -> None:
+    """7:18 AM — Enrich all leads missing estimated_value from county auditor GIS (free)."""
+    from enrichment.county_auditor import run_batch
+    log.info("STEP: County auditor enrichment")
+    try:
+        run_batch()
+    except Exception as e:
+        log.error(f"County auditor enrichment failed: {e}")
+
+
 def step_enrichment() -> None:
     """7:20 AM — Enrichment waterfall on all Gate 1 passing leads."""
     from db.client import get_client
@@ -247,6 +257,7 @@ def run_full_pipeline() -> None:
 
     step_run_agents()
     step_gate1_verification()
+    step_county_auditor()
     step_enrichment()
     step_gate2_verification()
     step_scoring()

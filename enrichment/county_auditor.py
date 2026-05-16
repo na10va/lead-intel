@@ -97,12 +97,13 @@ def _unix_ms_to_date(ms: Optional[int]) -> Optional[date]:
 
 
 def _extract_address_parts(address: str) -> tuple[str, str]:
-    """Split '10904 Shale Ave, Cleveland, OH' into ('10904', 'SHALE').
+    """Split '10904 Shale Ave' or '1650 5th Ave' into ('10904', 'SHALE') / ('1650', '5TH').
 
+    Handles both alphabetic and ordinal (5th, 112th) street names.
     Returns (street_number, first_word_of_street) in uppercase.
     Both are empty strings if the address can't be parsed.
     """
-    m = re.match(r"^(\d+)\s+([A-Za-z]+)", address.strip())
+    m = re.match(r"^(\d+)\s+([A-Za-z0-9]+)", address.strip())
     if not m:
         return "", ""
     return m.group(1), m.group(2).upper()
