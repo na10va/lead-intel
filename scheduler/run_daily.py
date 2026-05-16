@@ -234,6 +234,16 @@ def step_lake_county_email() -> None:
         log.error(f"Lake County monthly email failed: {e}")
 
 
+def step_skip_matrix_email() -> None:
+    """Every Monday at 7:05 AM — Email owner the Skip Matrix queue list."""
+    from enrichment.skip_matrix_flag import send_weekly_skip_matrix_email
+    log.info("STEP: Skip Matrix weekly email")
+    try:
+        send_weekly_skip_matrix_email()
+    except Exception as e:
+        log.error(f"Skip Matrix weekly email failed: {e}")
+
+
 def step_foreclosure_check() -> None:
     """Every 4 hours (7AM–7PM) — Foreclosure real-time check."""
     from agents.foreclosure_agent import run as foreclosure_run
@@ -307,9 +317,17 @@ def start_scheduler() -> None:
         id="lake_county_monthly_email",
     )
 
+    # Every Monday at 7:05 AM EST — Skip Matrix queue email to owner.
+    scheduler.add_job(
+        step_skip_matrix_email,
+        CronTrigger(day_of_week="mon", hour=7, minute=5, timezone="America/New_York"),
+        id="skip_matrix_weekly_email",
+    )
+
     log.info("Scheduler started — pipeline runs daily at 6:45 AM EST")
     log.info("Foreclosure check runs every 4 hours between 7 AM–7 PM EST")
     log.info("Lake County monthly email runs on the first Monday of each month at 7:00 AM EST (starting May 2026)")
+    log.info("Skip Matrix queue email runs every Monday at 7:05 AM EST")
 
     try:
         scheduler.start()
