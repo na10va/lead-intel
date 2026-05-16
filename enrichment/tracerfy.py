@@ -140,6 +140,7 @@ def _parse_sync_result(data: dict, property_state: str = "OH") -> dict:
         "owner_email": None, "owner_mailing_address": None,
         "owner_out_of_state": False,
         "api_owner_first_name": None, "api_owner_last_name": None,
+        "litigator": False,
         "mobile_found": False,
     }
 
@@ -148,6 +149,7 @@ def _parse_sync_result(data: dict, property_state: str = "OH") -> dict:
         return out
 
     person = persons[0]
+    out["litigator"] = bool(person.get("litigator"))
 
     # Phones — sorted by rank, mobile-first within same rank
     def _phone_rank(ph: dict) -> tuple:
@@ -398,10 +400,11 @@ def _parse_batch_row(row: dict, property_state: str = "OH") -> dict:
 def _write_enrichment(lead_id: str, parsed: dict, cost: float = COST_PER_HIT_BATCH) -> None:
     updates = {
         "phone_1":               parsed["phone_1"],
-        "phone_2":               parsed["phone_2"],
-        "phone_3":               parsed["phone_3"],
         "phone_1_dnc":           parsed["phone_1_dnc"],
+        "phone_2":               parsed["phone_2"],
         "phone_2_dnc":           parsed["phone_2_dnc"],
+        "phone_3":               parsed["phone_3"],
+        "litigator":             parsed.get("litigator", False),
         "owner_email":           parsed["owner_email"],
         "owner_mailing_address": parsed["owner_mailing_address"],
         "owner_out_of_state":    parsed["owner_out_of_state"],
@@ -411,6 +414,7 @@ def _write_enrichment(lead_id: str, parsed: dict, cost: float = COST_PER_HIT_BAT
         "enriched":              True,
         "verified_enriched":     True,
     }
+    # Keep False values (DNC, litigator) — only strip None
     updates = {k: v for k, v in updates.items() if v is not None}
     update_row("raw_leads", lead_id, updates)
 

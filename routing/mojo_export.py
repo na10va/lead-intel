@@ -70,11 +70,12 @@ def export_leads(
             .select(
                 "id,owner_name,owner_first_name,owner_last_name,"
                 "property_address,state,county,"
-                "phone_1,phone_2,phone_3,"
-                "score,tier,source_type,filing_date"
+                "phone_1,phone_1_dnc,phone_2,phone_2_dnc,phone_3,"
+                "litigator,score,tier,source_type,filing_date"
             )
             .in_("tier", tiers)
             .eq("routed_to_va", True)
+            .neq("litigator", True)          # never export litigators
             .order("tier")
             .order("score", desc=True)
             .range(offset, offset + PAGE - 1)
@@ -114,16 +115,25 @@ def export_leads(
             first = row.get("owner_first_name") or ""
             last = row.get("owner_last_name") or row.get("owner_name") or ""
 
+            # Strip DNC numbers — never dial a number on the DNC registry
+            def _clean_phone(num, is_dnc) -> str:
+                if is_dnc:
+                    return ""
+                return re.sub(r"\D", "", num or "")[-10:]
+
             phones = [
-                re.sub(r"\D", "", row.get("phone_1") or "")[-10:],
-                re.sub(r"\D", "", row.get("phone_2") or "")[-10:],
+                _clean_phone(row.get("phone_1"), row.get("phone_1_dnc")),
+                _clean_phone(row.get("phone_2"), row.get("phone_2_dnc")),
                 re.sub(r"\D", "", row.get("phone_3") or "")[-10:],
             ]
 
+            dnc_note = " | ⚠ Some phones DNC" if (
+                row.get("phone_1_dnc") or row.get("phone_2_dnc")
+            ) else ""
             notes = (
                 f"Tier {row.get('tier')} | Score {row.get('score')} | "
                 f"{row.get('source_type')} | {row.get('county')} County | "
-                f"Filed {row.get('filing_date')}"
+                f"Filed {row.get('filing_date')}{dnc_note}"
             )
 
             writer.writerow({

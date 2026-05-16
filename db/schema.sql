@@ -40,8 +40,11 @@ CREATE TABLE IF NOT EXISTS raw_leads (
     enriched            BOOLEAN     NOT NULL DEFAULT FALSE,
     enrichment_step     INTEGER,                        -- 1 = public sources, 2 = Skip Sherpa, 3 = Skip Matrix flagged
     phone_1             TEXT,
+    phone_1_dnc         BOOLEAN,                            -- TRUE = on DNC registry
     phone_2             TEXT,
+    phone_2_dnc         BOOLEAN,
     phone_3             TEXT,
+    litigator           BOOLEAN     NOT NULL DEFAULT FALSE, -- TRUE = known TCPA litigant, never call
     owner_email         TEXT,
     owner_mailing_address TEXT,
     owner_out_of_state  BOOLEAN     NOT NULL DEFAULT FALSE,
