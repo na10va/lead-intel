@@ -271,16 +271,19 @@ def _build_batch_row(lead: dict) -> Optional[dict]:
 
 def _submit_batch(rows: list[dict]) -> Optional[int]:
     """Submit a batch to Tracerfy. Returns queue_id or None on failure."""
-    payload = {
-        "json_data":      json.dumps(rows),
-        "address_column": "address",
-        "city_column":    "city",
-        "state_column":   "state",
-        "zip_column":     "zip",
-        "trace_type":     "normal",
+    # Batch endpoint expects multipart/form-data — send json_data as a file upload
+    auth_headers = {"Authorization": f"Bearer {_api_key()}"}
+    json_bytes = json.dumps(rows).encode("utf-8")
+    files = {
+        "json_data":      ("data.json", json_bytes, "application/json"),
+        "address_column": (None, "address"),
+        "city_column":    (None, "city"),
+        "state_column":   (None, "state"),
+        "zip_column":     (None, "zip"),
+        "trace_type":     (None, "normal"),
     }
     try:
-        resp = requests.post(BATCH_ENDPOINT, headers=_headers(), json=payload, timeout=60)
+        resp = requests.post(BATCH_ENDPOINT, headers=auth_headers, files=files, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         queue_id = data.get("queue_id")
