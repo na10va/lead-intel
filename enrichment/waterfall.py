@@ -51,18 +51,18 @@ def enrich_lead(lead_id: str) -> bool:
 
     _apply_enrichment(lead_id, step1_result, step=1, partial=True)
 
-    # Step 2 — Skip tracing (Skip Sherpa preferred; BatchLeads as fallback)
+    # Step 2 — Skip tracing (Tracerfy preferred at $0.02/hit; Skip Sherpa as fallback)
     from enrichment.skip_sherpa import SKIP_SHERPA_AVAILABLE
-    from enrichment.batch_leads import BATCH_LEADS_AVAILABLE, run_batch_leads
+    from enrichment.tracerfy import TRACERFY_AVAILABLE, run_tracerfy
 
     step2_result = None
 
-    if SKIP_SHERPA_AVAILABLE:
+    if TRACERFY_AVAILABLE:
+        log.info(f"Enrichment Step 2 (Tracerfy) for lead {lead_id}")
+        step2_result = run_tracerfy(lead)
+    elif SKIP_SHERPA_AVAILABLE:
         log.info(f"Enrichment Step 2 (Skip Sherpa) for lead {lead_id}")
         step2_result = run_skip_sherpa(lead)
-    elif BATCH_LEADS_AVAILABLE:
-        log.info(f"Enrichment Step 2 (BatchLeads) for lead {lead_id}")
-        step2_result = run_batch_leads(lead)
     else:
         log.warning(f"No Step 2 provider configured — skipping skip trace for lead {lead_id}")
 
