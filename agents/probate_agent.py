@@ -263,16 +263,26 @@ async def _fetch_cuyahoga(page: Page, since: date) -> list[dict]:
 
     # Pass 1: collect all DECEDENT case numbers across surname prefixes
     all_candidates: dict[str, dict] = {}  # case_number → {owner_name, address}
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 6  # abort after 6 straight timeouts (~4-5 min wasted max)
     for prefix in _SURNAME_PREFIXES:
         log.debug(f"Cuyahoga pass 1: prefix '{prefix}'")
         try:
             new_rows = await _cuyahoga_search_prefix(page, prefix, year_str)
+            consecutive_failures = 0  # reset on success
             for row in new_rows:
                 cn = row["case_number"]
                 if cn not in all_candidates:
                     all_candidates[cn] = row
         except Exception as e:
             log.warning(f"Cuyahoga: search failed for prefix '{prefix}': {e}")
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log.error(
+                    f"Cuyahoga probate: {MAX_CONSECUTIVE_FAILURES} consecutive prefix failures — "
+                    f"site appears down, aborting prefix scan early with {len(all_candidates)} candidates"
+                )
+                break
         await asyncio.sleep(random.uniform(3, 5))
 
     log.info(f"Cuyahoga pass 1 complete: {len(all_candidates)} unique DECEDENT case numbers")
@@ -791,11 +801,6 @@ async def _run_async(county: str, state: str, lookback_days: int) -> None:
                 browser = await pw.chromium.connect_over_cdp(sbr_ws, timeout=30000)
             except Exception as e:
                 log.error(f"Lake County: Scraping Browser CDP connect failed: {e}")
-                from routing.notify import send_sms
-                send_sms(
-                    f"[SOURCE ALERT] Lake County probate scraper: Scraping Browser "
-                    f"connection failed. Check BRIGHTDATA_SBR_WS in .env. Error: {str(e)[:80]}"
-                )
                 return
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
         else:
@@ -835,7 +840,6 @@ async def _run_async(county: str, state: str, lookback_days: int) -> None:
             if is_infra_block:
                 log.error(f"FETCH blocked for {county} (proxy/CF policy): {e}")
                 try:
-                    from db.client import get_client
                     get_client().table("sources").update({"blocked": True}).eq(
                         "source_name", "Lake County Probate Court"
                     ).execute()
@@ -941,15 +945,9 @@ async def _run_async(county: str, state: str, lookback_days: int) -> None:
             log.error(f"Error processing filing for {county}: {e}")
             continue
 
-    if tier_a_count > 0:
-        send_sms(
-            f"[Lead Intel] {new_records} new leads added — "
-            f"{tier_a_count} Tier A, {tier_b_count} Tier B. Check your sheet."
-        )
-
     log.info(
         f"Probate agent complete — {county.title()} County | "
-        f"{new_records} new records stored"
+        f"{new_records} new records stored | {tier_a_count} Tier A, {tier_b_count} Tier B"
     )
 
 

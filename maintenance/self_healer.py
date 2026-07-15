@@ -50,8 +50,8 @@ SOURCE_REGISTRY: dict[str, dict] = {
     },
     "probate_mahoning": {
         "agent": "agents/probate_agent.py",
-        "url": "https://www.mahoningcountyclerk.org/probate/",
-        "pattern": r"(?i)(estate|probate|case)",
+        "url": "https://portal-ohmahoning.tylertech.cloud/Portal/Home/Dashboard/29",
+        "pattern": r"(?i)(estate|probate|case|search)",
     },
     "code_violation_cuyahoga": {
         "agent": "agents/code_violation_agent.py",
@@ -80,7 +80,7 @@ SOURCE_REGISTRY: dict[str, dict] = {
     },
     "foreclosure_mahoning": {
         "agent": "agents/foreclosure_agent.py",
-        "url": "https://www.mahoningcountyclerk.org/recorder/",
+        "url": "https://recorder.mahoningcountyoh.gov/",
         "pattern": r"(?i)(recording|deed|lien|foreclosure)",
     },
     "tax_lien_cuyahoga": {

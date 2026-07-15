@@ -26,7 +26,6 @@ def enrich_lead(lead_id: str) -> bool:
     Returns False if all steps failed (lead is flagged for Skip Matrix if Tier A).
     """
     from enrichment.public_sources import run_public_sources
-    from enrichment.skip_sherpa import run_skip_sherpa
     from enrichment.skip_matrix_flag import flag_for_skip_matrix
 
     client = get_client()
@@ -52,14 +51,26 @@ def enrich_lead(lead_id: str) -> bool:
     _apply_enrichment(lead_id, step1_result, step=1, partial=True)
 
     # Step 2 — Skip tracing (Tracerfy preferred at $0.02/hit; Skip Sherpa as fallback)
-    from enrichment.skip_sherpa import SKIP_SHERPA_AVAILABLE
+    from enrichment.skip_sherpa import SKIP_SHERPA_AVAILABLE, run_single as run_skip_sherpa
     from enrichment.tracerfy import TRACERFY_AVAILABLE, run_tracerfy
 
     step2_result = None
 
-    if TRACERFY_AVAILABLE:
+    from maintenance.cost_watchdog import is_tracerfy_paused
+    tracerfy_ok = TRACERFY_AVAILABLE and not is_tracerfy_paused()
+
+    if tracerfy_ok:
         log.info(f"Enrichment Step 2 (Tracerfy) for lead {lead_id}")
         step2_result = run_tracerfy(lead)
+        # If Tracerfy hit a provider-level error (402/500/network), fall through to
+        # Skip Sherpa rather than treating it as a genuine no-match.
+        if step2_result.get("provider_error") and SKIP_SHERPA_AVAILABLE:
+            log.warning(f"Tracerfy provider error — falling back to Skip Sherpa for lead {lead_id}")
+            step2_result = run_skip_sherpa(lead)
+    elif TRACERFY_AVAILABLE and is_tracerfy_paused():
+        log.warning(f"Tracerfy paused (monthly cap hit) — falling back to Skip Sherpa for lead {lead_id}")
+        if SKIP_SHERPA_AVAILABLE:
+            step2_result = run_skip_sherpa(lead)
     elif SKIP_SHERPA_AVAILABLE:
         log.info(f"Enrichment Step 2 (Skip Sherpa) for lead {lead_id}")
         step2_result = run_skip_sherpa(lead)

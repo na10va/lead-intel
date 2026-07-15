@@ -72,14 +72,21 @@ def step_run_agents() -> None:
         ])
     tasks.append((bankruptcy_agent.run, ("ohio_northern",)))
 
+    AGENT_TIMEOUT_S = 1800  # 30 min max per agent — prevents a slow site from stalling the pipeline
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fn, *args): fn.__module__ for fn, args in tasks}
-        for future in concurrent.futures.as_completed(futures):
-            module = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                log.error(f"Agent {module} failed: {e}")
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=AGENT_TIMEOUT_S):
+                module = futures[future]
+                try:
+                    future.result(timeout=AGENT_TIMEOUT_S)
+                except concurrent.futures.TimeoutError:
+                    log.error(f"Agent {module} timed out after {AGENT_TIMEOUT_S}s — skipping")
+                except Exception as e:
+                    log.error(f"Agent {module} failed: {e}")
+        except concurrent.futures.TimeoutError:
+            pending = [m for f, m in futures.items() if not f.done()]
+            log.error(f"Agent pool hit {AGENT_TIMEOUT_S}s global timeout — {len(pending)} still running: {pending}")
 
 
 def step_gate1_verification() -> None:
@@ -138,6 +145,19 @@ def step_enrichment() -> None:
             log.error(f"Enrichment failed for lead {row['id']}: {e}")
 
 
+def step_tracerfy_batch() -> None:
+    """7:25 AM — Tracerfy batch enrichment on all leads missing phones ($0.02/hit)."""
+    from enrichment.tracerfy import run_batch, TRACERFY_AVAILABLE
+    if not TRACERFY_AVAILABLE:
+        log.warning("TRACERFY_API_KEY not set — skipping batch enrichment")
+        return
+    log.info("STEP: Tracerfy batch enrichment")
+    try:
+        run_batch(auto_route=True)
+    except Exception as e:
+        log.error(f"Tracerfy batch enrichment failed: {e}")
+
+
 def step_gate2_verification() -> None:
     """7:35 AM — Gate 2 post-enrichment verification."""
     from verification.verify_enrichment import run_all_unenriched
@@ -193,6 +213,53 @@ def step_zillow() -> None:
         log.error(f"Zillow Deal Finder failed: {e}")
 
 
+def step_pipeline_summary_sms() -> None:
+    """Send one end-of-pipeline SMS summarising today's new leads."""
+    from datetime import date
+    from db.client import get_client
+    from routing.notify import send_sms
+
+    try:
+        client = get_client()
+        today = date.today().isoformat()
+
+        rows = (
+            client.table("raw_leads")
+            .select("tier, score, owner_name, property_address, county, source_type")
+            .gte("created_at", today)
+            .not_.is_("tier", "null")
+            .execute()
+            .data or []
+        )
+
+        if not rows:
+            log.info("Pipeline summary SMS: no new leads today — skipping")
+            return
+
+        tier_counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+        for r in rows:
+            t = r.get("tier") or "D"
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+
+        top = max(rows, key=lambda r: r.get("score") or 0)
+        top_name    = (top.get("owner_name") or "Unknown").split(",")[0].strip()[:20]
+        top_county  = top.get("county") or ""
+        top_score   = top.get("score") or "?"
+        top_source  = (top.get("source_type") or "").replace("_", " ")
+
+        total = len(rows)
+        msg = (
+            f"[Lead Intel] Pipeline done — {total} new leads today\n"
+            f"A:{tier_counts['A']} B:{tier_counts['B']} C:{tier_counts['C']} D:{tier_counts['D']}\n"
+            f"Top: {top_name}, {top_county} — Score {top_score} ({top_source})\n"
+            f"Check your Google Sheet."
+        )
+        send_sms(msg)
+        log.info(f"Pipeline summary SMS sent — {total} leads, top score {top_score}")
+    except Exception as e:
+        log.error(f"Pipeline summary SMS failed: {e}")
+
+
 def step_daily_digest() -> None:
     """8:00 AM — Send daily digest (always runs)."""
     from verification.daily_report import send_daily_digest
@@ -244,6 +311,35 @@ def step_skip_matrix_email() -> None:
         log.error(f"Skip Matrix weekly email failed: {e}")
 
 
+def step_tracerfy_spend_reminder() -> None:
+    """Every Monday at 7:10 AM — SMS owner with Tracerfy month-to-date spend vs $75 cap."""
+    from datetime import date
+    from db.client import get_client
+    from routing.notify import send_sms
+    from maintenance.cost_watchdog import TRACERFY_MONTHLY_LIMIT_USD
+    log.info("STEP: Tracerfy weekly spend reminder")
+    try:
+        client = get_client()
+        month_start = date.today().replace(day=1).isoformat()
+        rows = (
+            client.table("api_costs")
+            .select("cost_usd")
+            .eq("service", "tracerfy")
+            .gte("called_at", month_start)
+            .execute()
+            .data or []
+        )
+        spent = sum(r.get("cost_usd", 0) for r in rows)
+        remaining = max(0.0, TRACERFY_MONTHLY_LIMIT_USD - spent)
+        pct = int(spent / TRACERFY_MONTHLY_LIMIT_USD * 100) if TRACERFY_MONTHLY_LIMIT_USD else 0
+        send_sms(
+            f"[Lead Intel] Tracerfy this month: ${spent:.2f} / ${TRACERFY_MONTHLY_LIMIT_USD:.0f} "
+            f"({pct}% used, ${remaining:.2f} left)."
+        )
+    except Exception as e:
+        log.error(f"Tracerfy spend reminder failed: {e}")
+
+
 def step_foreclosure_check() -> None:
     """Every 4 hours (7AM–7PM) — Foreclosure real-time check."""
     from agents.foreclosure_agent import run as foreclosure_run
@@ -269,11 +365,13 @@ def run_full_pipeline() -> None:
     step_gate1_verification()
     step_county_auditor()
     step_enrichment()
+    step_tracerfy_batch()
     step_gate2_verification()
     step_scoring()
     step_routing()
     step_mojo_sync()
     step_tier_d_stacker()
+    step_pipeline_summary_sms()
     step_zillow()
     step_daily_digest()
 
@@ -294,13 +392,24 @@ def start_scheduler() -> None:
     start_webhook_server()
     scheduler = BlockingScheduler(timezone="America/New_York")
 
-    scheduler.add_job(run_full_pipeline, CronTrigger(hour=6, minute=45))
+    # misfire_grace_time: if the process was down when a job was due, run it anyway
+    # if it comes back within this window. 2 hours covers a typical Render cold-start
+    # or brief deploy restart without causing double-fires on long outages.
+    GRACE = 7200  # seconds (2 hours)
+
+    scheduler.add_job(
+        run_full_pipeline,
+        CronTrigger(hour=6, minute=45),
+        id="daily_pipeline",
+        misfire_grace_time=GRACE,
+    )
     # Fire at 7AM, 11AM, 3PM, 7PM EST — respects the 7AM–7PM window from CLAUDE.md.
     scheduler.add_job(
         step_foreclosure_check,
         CronTrigger(hour="7,11,15,19", timezone="America/New_York"),
         id="foreclosure_realtime",
         replace_existing=True,
+        misfire_grace_time=GRACE,
     )
     # First Monday of each month at 7:00 AM EST.
     # start_date=2026-05-04: April data already ingested manually; emails begin in May.
@@ -315,6 +424,7 @@ def start_scheduler() -> None:
             timezone="America/New_York",
         ),
         id="lake_county_monthly_email",
+        misfire_grace_time=GRACE,
     )
 
     # Every Monday at 7:05 AM EST — Skip Matrix queue email to owner.
@@ -322,12 +432,22 @@ def start_scheduler() -> None:
         step_skip_matrix_email,
         CronTrigger(day_of_week="mon", hour=7, minute=5, timezone="America/New_York"),
         id="skip_matrix_weekly_email",
+        misfire_grace_time=GRACE,
+    )
+
+    # Every Monday at 7:10 AM EST — Tracerfy monthly spend reminder SMS.
+    scheduler.add_job(
+        step_tracerfy_spend_reminder,
+        CronTrigger(day_of_week="mon", hour=7, minute=10, timezone="America/New_York"),
+        id="tracerfy_spend_reminder",
+        misfire_grace_time=GRACE,
     )
 
     log.info("Scheduler started — pipeline runs daily at 6:45 AM EST")
     log.info("Foreclosure check runs every 4 hours between 7 AM–7 PM EST")
     log.info("Lake County monthly email runs on the first Monday of each month at 7:00 AM EST (starting May 2026)")
     log.info("Skip Matrix queue email runs every Monday at 7:05 AM EST")
+    log.info("Tracerfy spend reminder SMS runs every Monday at 7:10 AM EST")
 
     try:
         scheduler.start()

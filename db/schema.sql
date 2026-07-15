@@ -191,7 +191,7 @@ CREATE INDEX IF NOT EXISTS idx_zillow_deals_created_at      ON zillow_deals (cre
 CREATE TABLE IF NOT EXISTS api_costs (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     service     TEXT        NOT NULL
-                    CHECK (service IN ('skip_sherpa', 'twilio', 'sendgrid')),
+                    CHECK (service IN ('skip_sherpa', 'tracerfy', 'twilio', 'sendgrid')),
     lead_id     UUID        REFERENCES raw_leads (id) ON DELETE SET NULL,
     cost_usd    FLOAT       NOT NULL,
     called_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),

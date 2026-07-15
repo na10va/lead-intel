@@ -117,7 +117,7 @@ CUYAHOGA_GIS_URL = (
     "https://gis.cuyahogacounty.gov/server/rest/services/"
     "Open_Data_Parcels/MapServer/0/query"
 )
-CUYAHOGA_OUT_FIELDS = "parcelpin,certified_tax_total,sales_amount,transfer_date"
+CUYAHOGA_OUT_FIELDS = "parcelpin,certified_tax_total,sales_amount,transfer_date,par_addr_all"
 
 # Real Cuyahoga parcel IDs: XXX-XX-XXX (e.g. 019-12-089)
 # Code violation case IDs: CT26003660 — these need address-based lookup
@@ -164,12 +164,15 @@ def lookup_cuyahoga_parcel(parcel_id: str) -> Optional[dict]:
     if sale_price is not None:
         sale_price = int(float(sale_price))
 
+    par_addr = (attrs.get("par_addr_all") or "").strip() or None
+
     log.info(f"Cuyahoga {parcel_id}: assessed=${int(assessed):,} → market=${market_value:,}  "
              f"last_sale={sale_date}  price={sale_price}")
     return {
         "estimated_value": market_value,
         "last_sale_date":  str(sale_date) if sale_date else None,
         "last_sale_price": sale_price,
+        "_gis_address":    par_addr,  # written back to property_address if lead has none
     }
 
 
@@ -214,6 +217,13 @@ def enrich_cuyahoga(lead: dict) -> Optional[dict]:
     if _CUYAHOGA_PARCEL_RE.match(parcel_id):
         result = lookup_cuyahoga_parcel(parcel_id)
         if result:
+            # If the lead has no property_address, write back the GIS address now
+            gis_addr = result.pop("_gis_address", None)
+            if gis_addr and not address:
+                from db.client import update_row
+                update_row("raw_leads", lead["id"], {"property_address": gis_addr})
+                lead["property_address"] = gis_addr  # update in-memory so waterfall sees it
+                log.info(f"Cuyahoga {parcel_id}: wrote GIS address → '{gis_addr}'")
             return result
 
     # Fall back to address search (required for code violation leads with case IDs)

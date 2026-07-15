@@ -31,7 +31,6 @@ from dotenv import load_dotenv
 
 from db.client import get_client, insert_row, update_row
 from enrichment.waterfall import enrich_lead
-from routing.notify import send_sms
 from routing.va_router import route_lead
 from scoring.score import score_lead
 from utils.deduper import is_duplicate
@@ -297,15 +296,9 @@ async def _run_async(city: str, county: str, state: str, lookback_days: int) -> 
             log.error(f"Error processing record for {city}: {e}")
             continue
 
-    if tier_a_count > 0:
-        send_sms(
-            f"[Lead Intel] {new_records} new leads added — "
-            f"{tier_a_count} Tier A, {tier_b_count} Tier B. Check your sheet."
-        )
-
     log.info(
         f"Code violation agent complete — {city.title()}, {county.title()} County | "
-        f"{new_records} new records stored"
+        f"{new_records} new records stored | {tier_a_count} Tier A, {tier_b_count} Tier B"
     )
 
 

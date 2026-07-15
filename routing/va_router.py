@@ -171,6 +171,58 @@ def _get_or_init_worksheet(tab: str, columns: list) -> gspread.Worksheet:
     return ws
 
 
+def route_backlog(leads: list[dict]) -> tuple[int, int]:
+    """Bulk-route a list of enriched lead dicts to the VA sheet. No individual emails/SMS.
+
+    Respects DNC rules: leads where all phones are DNC go to dnc_review tab instead.
+    Marks routed_to_va=True (or False+routed_at for DNC holds) in bulk.
+
+    Returns (routed_count, dnc_held_count).
+    """
+    client = get_client()
+    va_leads, dnc_leads = [], []
+
+    for lead in leads:
+        tier = lead.get("tier")
+        if tier not in ("A", "B", "C"):
+            continue
+        p1_dnc = lead.get("phone_1_dnc")
+        p2_dnc = lead.get("phone_2_dnc")
+        has_phone = lead.get("phone_1") or lead.get("phone_2")
+        all_dnc = has_phone and (p1_dnc is True) and (p2_dnc is True or not lead.get("phone_2"))
+        if all_dnc:
+            dnc_leads.append(lead)
+        else:
+            va_leads.append(lead)
+
+    if va_leads:
+        _append_many_to_va_sheet(va_leads)
+        ids = [l["id"] for l in va_leads]
+        for i in range(0, len(ids), 100):
+            client.table("raw_leads").update(
+                {"routed_to_va": True, "routed_at": "now()"}
+            ).in_("id", ids[i:i+100]).execute()
+        log.info(f"Bulk routed {len(va_leads)} leads to VA sheet")
+
+    if dnc_leads:
+        ws = _get_or_init_worksheet(DNC_REVIEW_TAB, DNC_REVIEW_COLUMNS)
+        rows = []
+        for lead in dnc_leads:
+            row_data = {col: str(lead.get(col) or "") for col in DNC_REVIEW_COLUMNS}
+            row_data["dnc_review_note"] = "All phones on DNC registry — manual review required"
+            rows.append([row_data[col] for col in DNC_REVIEW_COLUMNS])
+        for i in range(0, len(rows), 500):
+            ws.append_rows(rows[i:i+500], value_input_option="USER_ENTERED")
+        ids = [l["id"] for l in dnc_leads]
+        for i in range(0, len(ids), 100):
+            client.table("raw_leads").update(
+                {"routed_to_va": True, "routed_at": "now()"}
+            ).in_("id", ids[i:i+100]).execute()
+        log.warning(f"{len(dnc_leads)} leads held in DNC review tab")
+
+    return len(va_leads), len(dnc_leads)
+
+
 def _append_to_va_sheet(lead: dict) -> None:
     """Append one lead row to the va_queue tab (single-lead path for daily operations)."""
     ws = _get_or_init_worksheet(VA_QUEUE_TAB, VA_COLUMNS)

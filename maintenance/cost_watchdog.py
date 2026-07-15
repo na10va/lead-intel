@@ -6,6 +6,7 @@ Runs after every enrichment batch. Checks total spend in api_costs for today.
 Thresholds:
     $50/day  → pause enrichment pipeline + SMS owner
     $200/month → email warning (no pause)
+    $75/month (Tracerfy only) → pause Tracerfy enrichment + SMS owner
 
 CLI:
     python maintenance/cost_watchdog.py --check
@@ -23,17 +24,24 @@ log = get_logger("maintenance.cost_watchdog")
 
 DAILY_LIMIT_USD = 50.0
 MONTHLY_LIMIT_USD = 200.0
+TRACERFY_MONTHLY_LIMIT_USD = 75.0
 
 OWNER_EMAIL = os.getenv("OWNER_EMAIL")
 OWNER_PHONE = os.getenv("OWNER_PHONE")
 
 # Global pipeline pause flag — checked by waterfall.py before calling Skip Sherpa
 _PIPELINE_PAUSED = False
+_TRACERFY_PAUSED = False
 
 
 def is_pipeline_paused() -> bool:
     """Return True if the cost watchdog has paused the enrichment pipeline."""
     return _PIPELINE_PAUSED
+
+
+def is_tracerfy_paused() -> bool:
+    """Return True if Tracerfy monthly spend has hit the $75 cap."""
+    return _TRACERFY_PAUSED
 
 
 def check_spend() -> dict:
@@ -65,6 +73,35 @@ def check_spend() -> dict:
         .data or []
     )
     monthly_spend = sum(r.get("cost_usd", 0) for r in monthly_rows)
+
+    # Tracerfy monthly spend
+    tracerfy_rows = (
+        client.table("api_costs")
+        .select("cost_usd")
+        .eq("service", "tracerfy")
+        .gte("called_at", month_start)
+        .execute()
+        .data or []
+    )
+    tracerfy_monthly_spend = sum(r.get("cost_usd", 0) for r in tracerfy_rows)
+
+    if tracerfy_monthly_spend >= TRACERFY_MONTHLY_LIMIT_USD and not _TRACERFY_PAUSED:
+        _TRACERFY_PAUSED = True
+        send_sms(
+            f"[COST ALERT] Tracerfy monthly spend hit ${tracerfy_monthly_spend:.2f} "
+            f"(limit ${TRACERFY_MONTHLY_LIMIT_USD:.0f}/month). "
+            f"Tracerfy enrichment paused for the rest of the month."
+        )
+        insert_row("maintenance_log", {
+            "event_type": "cost_alert",
+            "source_name": "tracerfy",
+            "description": (
+                f"Tracerfy monthly spend ${tracerfy_monthly_spend:.2f} exceeded "
+                f"${TRACERFY_MONTHLY_LIMIT_USD} limit. Tracerfy paused."
+            ),
+            "resolved": False,
+        })
+        log.error(f"COST ALERT: Tracerfy monthly spend ${tracerfy_monthly_spend:.2f} — Tracerfy paused")
 
     action_taken = "none"
     threshold_hit = None

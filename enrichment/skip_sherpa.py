@@ -31,14 +31,15 @@ from utils.logger import get_logger
 load_dotenv()
 log = get_logger("enrichment.skip_sherpa")
 
-# Confirmed working endpoint (api.skipsherpa.com does not resolve)
 SKIP_SHERPA_BASE    = "https://skipsherpa.com"
-PROPERTIES_ENDPOINT = f"{SKIP_SHERPA_BASE}/api/beta6/properties"
+PROPERTIES_ENDPOINT = f"{SKIP_SHERPA_BASE}/api/properties"
 BATCH_SIZE          = 25
 DAILY_CALL_LIMIT    = 500
 COST_PER_CALL_USD   = 0.10
 REQUEST_DELAY_S     = 1.5   # between API sub-batches — avoids per-minute rate limit
 PAGE_SIZE           = 200
+
+SKIP_SHERPA_AVAILABLE = bool(os.getenv("SKIP_SHERPA_API_KEY"))
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +342,24 @@ def _write_enrichment(lead_id: str, parsed: dict) -> None:
         "cost_usd": COST_PER_CALL_USD,
         "result":   result_label,
     })
+
+
+# ---------------------------------------------------------------------------
+# Single-lead enrichment (used by waterfall.py Step 2 fallback)
+# ---------------------------------------------------------------------------
+
+def run_single(lead: dict) -> dict:
+    """Enrich one lead via Skip Sherpa. Returns parsed result dict; does NOT write to DB."""
+    lk = _build_property_lookup(lead)
+    if not lk:
+        return {"mobile_found": False}
+    results = call_skip_sherpa_batch([lk])
+    if not results:
+        return {"mobile_found": False}
+    result = results[0]
+    if result.get("status_code") != 200:
+        return {"mobile_found": False}
+    return _parse_result(result, lead.get("state") or "OH")
 
 
 # ---------------------------------------------------------------------------

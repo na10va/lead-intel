@@ -45,9 +45,9 @@ ANALYTICS_URL     = f"{BASE_URL}/analytics/"
 
 COST_PER_HIT_BATCH = 0.02
 COST_PER_HIT_SYNC  = 0.10
-PAGE_SIZE          = 1000   # leads fetched from DB per iteration
-POLL_INTERVAL_S    = 10     # seconds between batch status polls
-POLL_TIMEOUT_S     = 600    # 10 minutes max wait per batch
+PAGE_SIZE          = 300    # leads fetched per batch — keeps each job under 5 min
+POLL_INTERVAL_S    = 15     # seconds between batch status polls
+POLL_TIMEOUT_S     = 1800   # 30 minutes max wait per batch
 PROGRESS_EVERY     = 100    # print progress every N processed leads
 SAFETY_BUFFER      = 25     # stop batch loop when credits_left <= this
 
@@ -202,6 +202,13 @@ def _parse_sync_result(data: dict, property_state: str = "OH") -> dict:
     return out
 
 
+_COUNTY_FALLBACK_CITY = {
+    "cuyahoga": ("Cleveland", "OH"),
+    "lake":     ("Painesville", "OH"),
+    "mahoning": ("Youngstown", "OH"),
+}
+
+
 def run_tracerfy(lead: dict) -> dict:
     """Enrich a single lead via Tracerfy sync endpoint.
 
@@ -211,8 +218,16 @@ def run_tracerfy(lead: dict) -> dict:
     raw_addr = lead.get("geocoded_address") or lead.get("property_address") or ""
     addr = _parse_address(raw_addr)
     if not addr:
-        log.warning(f"Cannot parse address for lead {lead['id'][:8]}: {raw_addr!r}")
-        return {"mobile_found": False}
+        # Probate addresses are often bare street addresses (no city/state).
+        # Fall back to the county's primary city so Tracerfy can resolve the property.
+        county = (lead.get("county") or "").lower()
+        fallback = _COUNTY_FALLBACK_CITY.get(county)
+        if fallback and raw_addr.strip():
+            addr = {"street": raw_addr.strip(), "city": fallback[0], "state": fallback[1], "zip": None}
+            log.debug(f"Address city fallback for lead {lead['id'][:8]}: {fallback[0]}, {fallback[1]}")
+        else:
+            log.warning(f"Cannot parse address for lead {lead['id'][:8]}: {raw_addr!r}")
+            return {"mobile_found": False}
 
     first, last = _parse_owner_name(lead.get("owner_name") or "")
     payload: dict = {
@@ -234,12 +249,14 @@ def run_tracerfy(lead: dict) -> dict:
         data = resp.json()
     except Exception as e:
         log.error(f"Tracerfy sync request failed for lead {lead['id'][:8]}: {e}")
-        return {"mobile_found": False}
+        # Signal a provider-level error so the waterfall can fall back to Skip Sherpa
+        # rather than treating this as a genuine "no match" result.
+        return {"mobile_found": False, "provider_error": True}
 
     if not data.get("hit"):
         insert_row("api_costs", {
             "service": "tracerfy", "lead_id": lead["id"],
-            "cost_usd": 0.0, "result": "no_result",
+            "cost_usd": 0.0, "result": "failed",
         })
         return {"mobile_found": False}
 
@@ -258,47 +275,68 @@ def _build_batch_row(lead: dict) -> Optional[dict]:
     addr = _parse_address(raw_addr)
     if not addr:
         return None
+    first, last = _parse_owner_name(lead.get("owner_name") or "")
     row = {
-        "id":      lead["id"],           # passed through — used to match results
-        "address": addr["street"],
-        "city":    addr["city"],
-        "state":   addr["state"],
+        "id":           lead["id"],      # passed through — used to match results
+        "address":      addr["street"],
+        "city":         addr["city"],
+        "state":        addr["state"],
+        "zip":          addr["zip"] or "",
+        "first_name":   first,
+        "last_name":    last,
+        "mail_address": "",
+        "mail_city":    "",
+        "mail_state":   "",
+        "mail_zip":     "",
     }
-    if addr["zip"]:
-        row["zip"] = addr["zip"]
     return row
 
 
-def _submit_batch(rows: list[dict]) -> Optional[int]:
-    """Submit a batch to Tracerfy. Returns queue_id or None on failure."""
-    # Batch endpoint expects multipart/form-data — send json_data as a file upload
+def _submit_batch(rows: list[dict]) -> Optional[tuple[int, int]]:
+    """Submit a batch to Tracerfy. Returns (queue_id, estimated_wait_seconds) or None on failure."""
     auth_headers = {"Authorization": f"Bearer {_api_key()}"}
-    json_bytes = json.dumps(rows).encode("utf-8")
-    files = {
-        "json_data":      ("data.json", json_bytes, "application/json"),
-        "address_column": (None, "address"),
-        "city_column":    (None, "city"),
-        "state_column":   (None, "state"),
-        "zip_column":     (None, "zip"),
-        "trace_type":     (None, "normal"),
+    form_data = {
+        "json_data":              json.dumps(rows),
+        "address_column":         "address",
+        "city_column":            "city",
+        "state_column":           "state",
+        "zip_column":             "zip",
+        "first_name_column":      "first_name",
+        "last_name_column":       "last_name",
+        "mail_address_column":    "mail_address",
+        "mail_city_column":       "mail_city",
+        "mail_state_column":      "mail_state",
+        "mail_zip_column":        "mail_zip",
+        "trace_type":             "normal",
     }
     try:
-        resp = requests.post(BATCH_ENDPOINT, headers=auth_headers, files=files, timeout=60)
-        resp.raise_for_status()
+        resp = requests.post(BATCH_ENDPOINT, headers=auth_headers, data=form_data, timeout=60)
+        if not resp.ok:
+            log.error(f"Tracerfy batch submit failed: {resp.status_code} — {resp.text[:500]}")
+            return None
         data = resp.json()
         queue_id = data.get("queue_id")
+        est_wait = int(data.get("estimated_wait_seconds") or POLL_INTERVAL_S)
         log.info(f"Batch submitted — queue_id={queue_id}  rows={data.get('rows_uploaded')}  "
-                 f"est_wait={data.get('estimated_wait_seconds')}s")
-        return queue_id
+                 f"est_wait={est_wait}s")
+        return queue_id, est_wait
     except Exception as e:
         log.error(f"Tracerfy batch submit failed: {e}")
         return None
 
 
-def _poll_batch(queue_id: int) -> Optional[list[dict]]:
-    """Poll until the batch job completes. Returns result rows or None on timeout/error."""
+def _poll_batch(queue_id: int, initial_wait: int = 30) -> Optional[list[dict]]:
+    """Poll until the batch job completes. Returns result rows or None on timeout/error.
+
+    Sleeps for initial_wait seconds before the first poll — Tracerfy needs time to start
+    processing and returns [] immediately if polled too soon, which looks like 0 results.
+    """
+    log.info(f"Waiting {initial_wait}s before first poll (est. processing time)...")
+    time.sleep(initial_wait)
+
     deadline = time.time() + POLL_TIMEOUT_S
     url = f"{QUEUE_ENDPOINT}/{queue_id}"
+    seen_pending = False   # True once we've confirmed the job is/was in queue
 
     while time.time() < deadline:
         try:
@@ -306,14 +344,25 @@ def _poll_batch(queue_id: int) -> Optional[list[dict]]:
             resp.raise_for_status()
             data = resp.json()
 
-            # Completed — data is a list of result rows
             if isinstance(data, list):
-                log.info(f"Batch {queue_id} complete — {len(data)} hits returned")
-                return data
+                if len(data) > 0:
+                    # Non-empty list — definitive completion with results
+                    log.info(f"Batch {queue_id} complete — {len(data)} hits returned")
+                    return data
+                else:
+                    # Empty list: complete with 0 hits if we already saw a pending status,
+                    # otherwise it's too early — Tracerfy returns [] before processing starts
+                    if seen_pending:
+                        log.info(f"Batch {queue_id} complete — 0 hits (no matches found)")
+                        return []
+                    log.debug(f"Batch {queue_id} returned [] before pending state — waiting...")
+                    time.sleep(POLL_INTERVAL_S)
+                    continue
 
-            # Still processing — data is a status dict
+            # Status dict — job is queued or processing
             status = data.get("status", "pending")
             pending = data.get("pending", "?")
+            seen_pending = True
             log.debug(f"Batch {queue_id} status={status}  pending={pending}")
 
             if status == "failed":
@@ -421,13 +470,16 @@ def _write_enrichment(lead_id: str, parsed: dict, cost: float = COST_PER_HIT_BAT
     updates = {k: v for k, v in updates.items() if v is not None}
     update_row("raw_leads", lead_id, updates)
 
-    insert_row("api_costs", {
-        "service":  "tracerfy",
-        "lead_id":  lead_id,
-        "cost_usd": cost if parsed.get("mobile_found") or parsed.get("phone_1") else 0.0,
-        "result":   "success" if parsed.get("mobile_found") else
-                    ("no_mobile" if parsed.get("phone_1") else "no_result"),
-    })
+    try:
+        insert_row("api_costs", {
+            "service":  "tracerfy",
+            "lead_id":  lead_id,
+            "cost_usd": cost if parsed.get("mobile_found") or parsed.get("phone_1") else 0.0,
+            "result":   "success" if parsed.get("mobile_found") else
+                        ("no_mobile" if parsed.get("phone_1") else "failed"),
+        })
+    except Exception as e:
+        log.warning(f"Could not log api_costs for lead {lead_id[:8]}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -517,15 +569,69 @@ def run_sample(n: int = 5, tiers: Optional[list[str]] = None) -> None:
 # Full async batch run — $0.02/hit
 # ---------------------------------------------------------------------------
 
-def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000) -> None:
+def _post_batch_route_and_export() -> None:
+    """Score newly enriched leads, route Tier A/B/C to VA sheet + Mojo CSV."""
+    from scoring.score import run_batch_scoring
+    from routing.va_router import route_backlog
+    from routing.mojo_export import export_leads
+
+    sep = "─" * 70
+    print(f"\n{sep}")
+    print("  Post-batch: scoring newly enriched leads...")
+    run_batch_scoring(rescore=False)
+
+    # Route all new Tier A/B/C leads with phones to VA sheet + Mojo
+    client = get_client()
+    q = (
+        client.table("raw_leads")
+        .select("*")
+        .in_("tier", ["A", "B", "C"])
+        .eq("routed_to_va", False)
+        .not_.is_("phone_1", "null")
+        .eq("verified_raw", True)
+        .eq("enriched", True)
+        .neq("litigator", True)
+    )
+
+    to_route: list[dict] = []
+    offset = 0
+    while True:
+        page = q.range(offset, offset + 999).execute().data or []
+        to_route.extend(page)
+        if len(page) < 1000:
+            break
+        offset += 1000
+
+    if to_route:
+        print(f"  Routing {len(to_route)} leads (Tier A/B/C) to VA sheet...")
+        routed, dnc_held = route_backlog(to_route)
+        print(f"  ✓ VA sheet: {routed} routed  |  {dnc_held} held in DNC review")
+    else:
+        print("  No new leads to route")
+
+    print("  Exporting Mojo CSV...")
+    export_path = export_leads(new_only=True)
+    print(f"  ✓ Mojo CSV ready: {export_path}")
+    print(f"{sep}\n")
+
+
+def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000,
+              auto_route: bool = True) -> None:
     """Enrich all leads missing phones via Tracerfy batch endpoint ($0.02/hit).
 
     Submits leads in pages, waits for each batch to complete before fetching next page.
+    Caps each batch at available credit balance so the API never rejects on insufficient credits.
+    When auto_route=True (default), scores and routes new leads to the VA sheet + Mojo CSV
+    automatically after the batch completes.
     """
     log.info(f"Tracerfy batch starting — tiers={tiers or 'all'}  max_leads={max_leads}")
 
     credits = get_credits()
     print(f"\nTracerfy account balance: {credits} credits")
+    if credits is not None and credits <= SAFETY_BUFFER:
+        print(f"  ⚠ Insufficient credits ({credits} ≤ safety buffer {SAFETY_BUFFER}). "
+              f"Top up at tracerfy.com and retry.")
+        return
     print(f"{'─'*70}")
     print(f"  Tracerfy batch — tiers={tiers or 'all'}  max_leads={max_leads}")
     print(f"  Cost: $0.02/hit (1 credit/hit at normal tier)")
@@ -539,7 +645,16 @@ def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000) -> Non
 
     while total_submitted < max_leads:
         client = get_client()
-        fetch_size = min(PAGE_SIZE, max_leads - total_submitted)
+
+        # Refresh credits each loop so we cap accurately after previous batches consumed some
+        current_credits = get_credits()
+        if current_credits is not None and current_credits <= SAFETY_BUFFER:
+            print(f"  Credits exhausted ({current_credits} remaining) — stopping batch. "
+                  f"Top up at tracerfy.com to continue.")
+            break
+
+        available = (current_credits - SAFETY_BUFFER) if current_credits is not None else PAGE_SIZE
+        fetch_size = min(PAGE_SIZE, max_leads - total_submitted, available)
 
         q = (
             client.table("raw_leads")
@@ -585,27 +700,59 @@ def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000) -> Non
             continue
 
         # Submit batch
-        queue_id = _submit_batch(rows)
-        if not queue_id:
+        submit_result = _submit_batch(rows)
+        if not submit_result:
             log.error("Batch submission failed — stopping")
             break
+        queue_id, est_wait = submit_result
 
         total_submitted += len(rows)
         print(f"  Batch submitted: {len(rows)} leads → queue_id={queue_id}  "
               f"(total submitted: {total_submitted})")
 
-        # Poll until complete
-        results = _poll_batch(queue_id)
+        # Poll until complete — wait estimated time first so we don't read [] prematurely
+        results = _poll_batch(queue_id, initial_wait=est_wait)
         if results is None:
             log.error(f"Batch {queue_id} did not complete — stopping")
             break
 
-        # Write results — match by "id" field passed through in json_data
-        result_by_id = {row.get("id"): row for row in results if row.get("id")}
+        # Build result lookup by ID (if Tracerfy echoes it back) and by address (fallback).
+        # Tracerfy does not guarantee it echoes the "id" field — address matching is the
+        # primary strategy.
+        if results:
+            log.debug(f"Sample result row keys: {list(results[0].keys())}")
+
+        result_by_id: dict = {}
+        result_by_addr: dict = {}
+        for r in results:
+            row_id = r.get("id")
+            if row_id:
+                result_by_id[str(row_id)] = r
+            addr_key = (
+                (r.get("address") or "").lower().strip(),
+                (r.get("city")    or "").lower().strip(),
+                (r.get("state")   or "").upper().strip(),
+            )
+            if any(addr_key):
+                result_by_addr[addr_key] = r
+
+        # Also build lookup from submitted row address → lead_id
+        row_by_lead_id = {r["id"]: r for r in rows}
+
         batch_hits = batch_mobile = 0
 
         for lead_id, lead in lead_map.items():
+            # Try ID match first, then fall back to address match
             result_row = result_by_id.get(lead_id)
+            if not result_row:
+                submitted = row_by_lead_id.get(lead_id, {})
+                addr_key = (
+                    (submitted.get("address") or "").lower().strip(),
+                    (submitted.get("city")    or "").lower().strip(),
+                    (submitted.get("state")   or "").upper().strip(),
+                )
+                result_row = result_by_addr.get(addr_key)
+
             if not result_row:
                 # No hit for this lead
                 update_row("raw_leads", lead_id, {
@@ -616,7 +763,7 @@ def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000) -> Non
                 })
                 insert_row("api_costs", {
                     "service": "tracerfy", "lead_id": lead_id,
-                    "cost_usd": 0.0, "result": "no_result",
+                    "cost_usd": 0.0, "result": "failed",
                 })
                 continue
 
@@ -647,6 +794,9 @@ def run_batch(tiers: Optional[list[str]] = None, max_leads: int = 50_000) -> Non
     log.info(f"Tracerfy batch complete — submitted={total_submitted} hits={total_hits} "
              f"mobile={total_mobile} cost≈${total_hits * COST_PER_HIT_BATCH:.2f}")
 
+    if auto_route and total_hits > 0:
+        _post_batch_route_and_export()
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -664,6 +814,8 @@ if __name__ == "__main__":
                         help="Max leads to submit this run (default 50,000)")
     parser.add_argument("--credits", action="store_true",
                         help="Check account credit balance and exit")
+    parser.add_argument("--no-auto-route", action="store_true",
+                        help="Skip scoring/routing/Mojo export after batch (enrichment only)")
     args = parser.parse_args()
 
     if args.credits:
@@ -674,6 +826,6 @@ if __name__ == "__main__":
         run_sample(n=args.sample, tiers=tiers)
     elif args.all:
         tiers = [t.strip().upper() for t in args.tier.split(",")] if args.tier else None
-        run_batch(tiers=tiers, max_leads=args.limit)
+        run_batch(tiers=tiers, max_leads=args.limit, auto_route=not args.no_auto_route)
     else:
         parser.print_help()

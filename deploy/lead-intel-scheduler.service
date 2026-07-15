@@ -1,0 +1,22 @@
+[Unit]
+Description=Lead Intel Scheduler — daily pipeline + foreclosure real-time checks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/lead-intel
+ExecStart=/home/ubuntu/lead-intel/.venv/bin/python scheduler/run_daily.py
+Environment=PYTHONPATH=/home/ubuntu/lead-intel
+
+# Auto-restart on crash — waits 10 seconds before retrying
+Restart=on-failure
+RestartSec=10
+
+# Log output goes to journald (view with: journalctl -u lead-intel-scheduler -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

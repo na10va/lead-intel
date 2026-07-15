@@ -127,6 +127,10 @@ def export_leads(
                 re.sub(r"\D", "", row.get("phone_3") or "")[-10:],
             ]
 
+            # Skip leads where every phone was stripped — nothing for the VA to dial
+            if not any(phones):
+                continue
+
             dnc_note = " | ⚠ Some phones DNC" if (
                 row.get("phone_1_dnc") or row.get("phone_2_dnc")
             ) else ""

@@ -34,7 +34,6 @@ import argparse
 from typing import Optional
 
 from db.client import get_client, update_row
-from routing.notify import send_sms
 from routing.va_router import route_lead
 from scoring.score import score_lead
 from utils.deduper import _normalize_address, get_stacked_signals
@@ -184,12 +183,6 @@ def _run_stacker(tier_d_source: str, dry_run: bool = False) -> int:
                 # Route if tier improved to A or B for the first time
                 if new_tier in ("A", "B") and old_tier not in ("A", "B"):
                     route_lead(lead_id, new_tier)
-                    if new_tier == "A":
-                        send_sms(
-                            f"[TIER UPGRADE] {primary.get('owner_name')} | "
-                            f"{address} | {county} — "
-                            f"upgraded to Tier A via {tier_d_source} stack"
-                        )
             else:
                 upgraded += 1  # count even in dry run for reporting
 

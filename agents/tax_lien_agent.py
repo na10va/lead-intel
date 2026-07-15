@@ -65,7 +65,6 @@ from playwright.async_api import Page, async_playwright
 
 from db.client import get_client, insert_row, update_row
 from enrichment.waterfall import enrich_lead
-from routing.notify import send_sms
 from routing.va_router import route_lead
 from scoring.score import score_lead
 from utils.deduper import is_duplicate
@@ -567,12 +566,6 @@ def ingest_lake_county_file(filepath: str, state: str = "OH") -> None:
             log.error(f"Error processing Lake County record {raw.get('parcel_id')}: {e}")
             continue
 
-    if tier_a_count > 0:
-        send_sms(
-            f"[Lead Intel] Lake County file ingest: {new_records} new tax lien leads — "
-            f"{tier_a_count} Tier A, {tier_b_count} Tier B."
-        )
-
     log.info(
         f"Lake County file ingest complete — {new_records} new records stored "
         f"({tier_a_count} Tier A, {tier_b_count} Tier B)"
@@ -732,12 +725,6 @@ def ingest_cuyahoga_forfeited_lands(state: str = "OH") -> None:
             log.error(f"Error processing forfeited land record {raw.get('parcel_id')}: {e}")
             continue
 
-    if tier_a_count > 0:
-        send_sms(
-            f"[Lead Intel] Cuyahoga Forfeited Lands ingest: {new_records} new tax lien leads — "
-            f"{tier_a_count} Tier A, {tier_b_count} Tier B."
-        )
-
     log.info(
         f"Cuyahoga Forfeited Lands ingest complete — {new_records} new records stored "
         f"({tier_a_count} Tier A, {tier_b_count} Tier B)"
@@ -828,10 +815,6 @@ async def _run_async(county: str, state: str) -> None:
                     }).eq("source_name", "Lake County Treasurer").execute()
                 except Exception:
                     pass
-                send_sms(
-                    "[SOURCE ALERT] Lake County tax lien: no delinquent list view found. "
-                    "Contact auditor (440-350-2528) for bulk export. Source flagged."
-                )
                 await browser.close()
                 return
             except MahoningBlockedError as e:
@@ -844,11 +827,6 @@ async def _run_async(county: str, state: str) -> None:
                     }).eq("source_name", "Mahoning County Treasurer").execute()
                 except Exception:
                     pass
-                send_sms(
-                    "[SOURCE ALERT] Mahoning County tax lien blocked (Cloudflare + SSL). "
-                    "Contact Mahoning Auditor (330-740-2010) for CSV export, "
-                    "or evaluate Zyte API. Source flagged."
-                )
                 await browser.close()
                 return
             except Exception as e:
@@ -940,15 +918,9 @@ async def _run_async(county: str, state: str) -> None:
             log.error(f"Error processing tax lien record for {county}: {e}")
             continue
 
-    if tier_a_count > 0:
-        send_sms(
-            f"[Lead Intel] {new_records} new tax lien leads — "
-            f"{tier_a_count} Tier A, {tier_b_count} Tier B. Check your sheet."
-        )
-
     log.info(
         f"Tax lien agent complete — {county.title()} County | "
-        f"{new_records} new records stored"
+        f"{new_records} new records stored | {tier_a_count} Tier A, {tier_b_count} Tier B"
     )
 
 
