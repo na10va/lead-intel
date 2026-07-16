@@ -10,8 +10,6 @@ Usage:
 
 import argparse
 import concurrent.futures
-import sys
-
 from db.client import get_client
 from enrichment.waterfall import enrich_lead
 from utils.logger import get_logger
@@ -19,8 +17,9 @@ from utils.logger import get_logger
 log = get_logger("enrichment.backlog")
 
 
-def fetch_backlog(client) -> list[str]:
-    """Return IDs of all unenriched Tier A/B/C verified leads."""
+def fetch_backlog(client, tiers: list[str] | None = None) -> list[str]:
+    """Return IDs of all unenriched verified leads for the given tiers."""
+    tiers = tiers or ["A", "B", "C"]
     ids = []
     offset = 0
     while True:
@@ -29,7 +28,7 @@ def fetch_backlog(client) -> list[str]:
             .select("id")
             .eq("enriched", False)
             .eq("verified_raw", True)
-            .in_("tier", ["A", "B", "C"])
+            .in_("tier", tiers)
             .range(offset, offset + 999)
             .execute()
             .data or []
@@ -43,9 +42,9 @@ def fetch_backlog(client) -> list[str]:
     return ids
 
 
-def run(dry_run: bool = False, concurrency: int = 4) -> None:
+def run(dry_run: bool = False, concurrency: int = 4, tiers: list[str] | None = None) -> None:
     client = get_client()
-    ids = fetch_backlog(client)
+    ids = fetch_backlog(client, tiers=tiers)
     log.info(f"Enrichment backlog: {len(ids)} Tier A/B/C leads to enrich")
 
     if dry_run:
@@ -86,5 +85,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Enrich all unenriched Tier A/B/C leads")
     parser.add_argument("--dry-run", action="store_true", help="List leads without enriching")
     parser.add_argument("--concurrency", type=int, default=4, help="Parallel enrichment threads (default 4)")
+    parser.add_argument("--tier", metavar="TIER", help="Only enrich leads of this tier: A, B, C, or D")
     args = parser.parse_args()
-    run(dry_run=args.dry_run, concurrency=args.concurrency)
+    tiers = [args.tier.upper()] if args.tier else None
+    run(dry_run=args.dry_run, concurrency=args.concurrency, tiers=tiers)
