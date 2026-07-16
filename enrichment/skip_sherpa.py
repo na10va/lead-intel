@@ -284,10 +284,13 @@ def _calls_today(client) -> int:
 # We zip(lookups, results) to match them.
 # ---------------------------------------------------------------------------
 
-def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict]:
+def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict] | None:
     """
     Send up to BATCH_SIZE PropertyLookup dicts to Skip Sherpa.
-    Returns property_results list in the same order as lookups (empty on failure).
+    Returns property_results list in the same order as lookups.
+    Returns None on provider-level errors (HTTP 4xx/5xx, network failure) so
+    callers can distinguish a genuine no-match from an API failure.
+    Returns [] only when the API responded 200 but found no results.
     """
     try:
         resp = requests.put(
@@ -297,17 +300,15 @@ def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict]:
             timeout=30,
         )
         if resp.status_code == 429:
-            # The API's Retry-After header (60s) is unreliable — real reset window
-            # appears to be ~15 minutes. Use the header value but floor at 900s.
             retry_after = max(int(resp.headers.get("Retry-After", 900)), 900)
             log.warning(f"Skip Sherpa rate limited — waiting {retry_after}s before retry")
             time.sleep(retry_after)
-            return []
+            return None
         resp.raise_for_status()
         return resp.json().get("property_results") or []
     except Exception as e:
         log.error(f"Skip Sherpa batch request failed: {e}")
-        return []
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +350,19 @@ def _write_enrichment(lead_id: str, parsed: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def run_single(lead: dict) -> dict:
-    """Enrich one lead via Skip Sherpa. Returns parsed result dict; does NOT write to DB."""
+    """Enrich one lead via Skip Sherpa. Returns parsed result dict; does NOT write to DB.
+
+    Sets provider_error=True when the API itself failed (HTTP error, network timeout)
+    so the waterfall can fall back to Tracerfy. A genuine no-match returns
+    mobile_found=False without provider_error.
+    """
     lk = _build_property_lookup(lead)
     if not lk:
         return {"mobile_found": False}
     results = call_skip_sherpa_batch([lk])
+    if results is None:
+        # Provider-level error — signal the waterfall to try Tracerfy
+        return {"mobile_found": False, "provider_error": True}
     if not results:
         return {"mobile_found": False}
     result = results[0]
@@ -614,7 +623,7 @@ def run_batch(tier_filter: Optional[str] = None, max_calls: int = 950) -> None:
         for i in range(0, len(lookups), BATCH_SIZE):
             chunk   = lookups[i:i + BATCH_SIZE]
             results = call_skip_sherpa_batch(chunk)
-            all_results.extend(results)
+            all_results.extend(results or [])
             api_calls_made += len(chunk)   # count every lookup sent, hit or miss
             time.sleep(REQUEST_DELAY_S)
 

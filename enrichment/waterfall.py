@@ -50,30 +50,23 @@ def enrich_lead(lead_id: str) -> bool:
 
     _apply_enrichment(lead_id, step1_result, step=1, partial=True)
 
-    # Step 2 — Skip tracing (Tracerfy preferred at $0.02/hit; Skip Sherpa as fallback)
+    # Step 2 — Skip tracing (Skip Sherpa first to exhaust prepaid credits; Tracerfy as fallback)
     from enrichment.skip_sherpa import SKIP_SHERPA_AVAILABLE, run_single as run_skip_sherpa
     from enrichment.tracerfy import TRACERFY_AVAILABLE, run_tracerfy
+    from maintenance.cost_watchdog import is_tracerfy_paused
 
     step2_result = None
 
-    from maintenance.cost_watchdog import is_tracerfy_paused
-    tracerfy_ok = TRACERFY_AVAILABLE and not is_tracerfy_paused()
-
-    if tracerfy_ok:
-        log.info(f"Enrichment Step 2 (Tracerfy) for lead {lead_id}")
-        step2_result = run_tracerfy(lead)
-        # If Tracerfy hit a provider-level error (402/500/network), fall through to
-        # Skip Sherpa rather than treating it as a genuine no-match.
-        if step2_result.get("provider_error") and SKIP_SHERPA_AVAILABLE:
-            log.warning(f"Tracerfy provider error — falling back to Skip Sherpa for lead {lead_id}")
-            step2_result = run_skip_sherpa(lead)
-    elif TRACERFY_AVAILABLE and is_tracerfy_paused():
-        log.warning(f"Tracerfy paused (monthly cap hit) — falling back to Skip Sherpa for lead {lead_id}")
-        if SKIP_SHERPA_AVAILABLE:
-            step2_result = run_skip_sherpa(lead)
-    elif SKIP_SHERPA_AVAILABLE:
+    if SKIP_SHERPA_AVAILABLE:
         log.info(f"Enrichment Step 2 (Skip Sherpa) for lead {lead_id}")
         step2_result = run_skip_sherpa(lead)
+        # If Skip Sherpa hit a provider-level error (404/500/network), fall back to Tracerfy
+        if step2_result.get("provider_error") and TRACERFY_AVAILABLE and not is_tracerfy_paused():
+            log.warning(f"Skip Sherpa provider error — falling back to Tracerfy for lead {lead_id}")
+            step2_result = run_tracerfy(lead)
+    elif TRACERFY_AVAILABLE and not is_tracerfy_paused():
+        log.info(f"Enrichment Step 2 (Tracerfy) for lead {lead_id}")
+        step2_result = run_tracerfy(lead)
     else:
         log.warning(f"No Step 2 provider configured — skipping skip trace for lead {lead_id}")
 
