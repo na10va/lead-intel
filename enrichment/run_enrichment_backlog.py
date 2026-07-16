@@ -28,6 +28,7 @@ def fetch_backlog(client, tiers: list[str] | None = None) -> list[str]:
             .select("id")
             .eq("enriched", False)
             .eq("verified_raw", True)
+            .eq("no_mobile_exhausted", False)
             .in_("tier", tiers)
             .range(offset, offset + 999)
             .execute()

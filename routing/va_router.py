@@ -25,9 +25,10 @@ from utils.logger import get_logger
 
 log = get_logger("routing.va_router")
 
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-VA_QUEUE_TAB    = os.getenv("VA_QUEUE_SHEET_TAB", "va_queue")
-DNC_REVIEW_TAB  = os.getenv("DNC_REVIEW_SHEET_TAB", "dnc_review")
+GOOGLE_SHEET_ID  = os.getenv("GOOGLE_SHEET_ID")
+VA_QUEUE_TAB     = os.getenv("VA_QUEUE_SHEET_TAB", "va_queue")
+DNC_REVIEW_TAB   = os.getenv("DNC_REVIEW_SHEET_TAB", "dnc_review")
+NO_MOBILE_TAB    = os.getenv("NO_MOBILE_SHEET_TAB", "no_mobile_queue")
 OWNER_EMAIL = os.getenv("OWNER_EMAIL")
 _SA_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials/google_service_account.json")
 _SCOPES = [
@@ -54,6 +55,12 @@ VA_COLUMNS = [
     "property_address", "county", "state",
     "phone_1", "phone_1_dnc", "phone_2", "phone_2_dnc", "phone_3",
     "owner_email", "score", "tier", "source_type", "filing_date", "created_at",
+]
+
+NO_MOBILE_COLUMNS = [
+    "owner_name", "property_address", "county", "state",
+    "tier", "score", "source_type", "filing_date",
+    "estimated_value", "created_at",
 ]
 
 DNC_REVIEW_COLUMNS = [
@@ -242,6 +249,14 @@ def _append_many_to_va_sheet(leads: list[dict]) -> None:
     for i in range(0, len(rows), chunk_size):
         ws.append_rows(rows[i:i + chunk_size], value_input_option="USER_ENTERED")
         log.info(f"Wrote rows {i+1}–{min(i+chunk_size, len(rows))} of {len(rows)} to VA sheet")
+
+
+def route_no_mobile_lead(lead: dict) -> None:
+    """Append a lead that exhausted all enrichment steps to the no_mobile_queue tab."""
+    ws = _get_or_init_worksheet(NO_MOBILE_TAB, NO_MOBILE_COLUMNS)
+    row = [str(lead.get(col) or "") for col in NO_MOBILE_COLUMNS]
+    ws.append_rows([row], value_input_option="USER_ENTERED")
+    log.info(f"Lead {str(lead.get('id', ''))[:8]} written to no_mobile_queue tab")
 
 
 def _append_to_dnc_review_sheet(lead: dict) -> None:

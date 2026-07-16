@@ -89,13 +89,23 @@ def enrich_lead(lead_id: str) -> bool:
         flag_for_skip_matrix(lead_id)
 
     update_row("raw_leads", lead_id, {
-        "enriched": True,
-        "enriched_at": "now()",
-        "verification_notes": (
+        "enriched":            True,
+        "enriched_at":         "now()",
+        "no_mobile_exhausted": True,
+        "verification_notes":  (
             (lead.get("verification_notes") or "") +
             " | Enrichment: no mobile found after Steps 1+2"
         ).strip(" | "),
     })
+
+    # Write to no_mobile_queue Google Sheet tab
+    try:
+        from routing.va_router import route_no_mobile_lead
+        # Re-fetch lead to include any enrichment data written by Step 1
+        refreshed = client.table("raw_leads").select("*").eq("id", lead_id).single().execute().data
+        route_no_mobile_lead(refreshed or lead)
+    except Exception as e:
+        log.warning(f"Could not write lead {lead_id} to no_mobile_queue sheet: {e}")
 
     log.warning(f"Lead {lead_id} — no mobile found after all enrichment steps")
     return False

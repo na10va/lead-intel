@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS raw_leads (
     estimated_equity_pct FLOAT,                        -- 0.0–100.0
     last_sale_date      DATE,
     last_sale_price     INTEGER,                        -- in USD
-    skip_matrix_needed  BOOLEAN     NOT NULL DEFAULT FALSE,
+    skip_matrix_needed   BOOLEAN     NOT NULL DEFAULT FALSE,
+    no_mobile_exhausted  BOOLEAN     NOT NULL DEFAULT FALSE,
 
     -- Verification — Gate 1 (post-scrape)
     verified_raw        BOOLEAN     NOT NULL DEFAULT FALSE,
