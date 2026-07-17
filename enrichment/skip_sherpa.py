@@ -284,6 +284,10 @@ def _calls_today(client) -> int:
 # We zip(lookups, results) to match them.
 # ---------------------------------------------------------------------------
 
+_RETRY_STATUSES = {404, 500, 502, 503, 504}
+_MAX_RETRIES    = 3
+
+
 def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict] | None:
     """
     Send up to BATCH_SIZE PropertyLookup dicts to Skip Sherpa.
@@ -291,24 +295,40 @@ def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict] | None:
     Returns None on provider-level errors (HTTP 4xx/5xx, network failure) so
     callers can distinguish a genuine no-match from an API failure.
     Returns [] only when the API responded 200 but found no results.
+
+    Retries up to _MAX_RETRIES times on transient errors (404, 5xx) with
+    exponential backoff. Does not retry on 401/402 (auth/billing failures).
     """
-    try:
-        resp = requests.put(
-            PROPERTIES_ENDPOINT,
-            headers=_headers(),
-            json={"property_lookups": lookups},
-            timeout=30,
-        )
-        if resp.status_code == 429:
-            retry_after = max(int(resp.headers.get("Retry-After", 900)), 900)
-            log.warning(f"Skip Sherpa rate limited — waiting {retry_after}s before retry")
-            time.sleep(retry_after)
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            resp = requests.put(
+                PROPERTIES_ENDPOINT,
+                headers=_headers(),
+                json={"property_lookups": lookups},
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                log.warning(f"Skip Sherpa rate limited — waiting {retry_after}s")
+                time.sleep(retry_after)
+                continue
+            if resp.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
+                wait = 2 ** (attempt + 1)
+                log.warning(f"Skip Sherpa {resp.status_code} (attempt {attempt+1}/{_MAX_RETRIES}) — retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json().get("property_results") or []
+        except requests.exceptions.RequestException as e:
+            if attempt < _MAX_RETRIES:
+                wait = 2 ** (attempt + 1)
+                log.warning(f"Skip Sherpa network error (attempt {attempt+1}/{_MAX_RETRIES}): {e} — retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            log.error(f"Skip Sherpa batch request failed after {_MAX_RETRIES} retries: {e}")
             return None
-        resp.raise_for_status()
-        return resp.json().get("property_results") or []
-    except Exception as e:
-        log.error(f"Skip Sherpa batch request failed: {e}")
-        return None
+    log.error(f"Skip Sherpa batch request failed: exhausted {_MAX_RETRIES} retries")
+    return None
 
 
 # ---------------------------------------------------------------------------
