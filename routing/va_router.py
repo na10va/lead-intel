@@ -14,6 +14,7 @@ Sheet must be shared with the service account email as Editor.
 """
 
 import os
+import threading
 from typing import Optional
 
 from google.oauth2.service_account import Credentials
@@ -37,9 +38,14 @@ _SCOPES = [
 ]
 
 _gc: Optional[gspread.Client] = None
-# Tracks which sheet tabs have already had their header row confirmed this session.
-# Prevents re-reading the full sheet on every append (avoids Sheets read quota).
+# Cache of tab_name → Worksheet object; populated once per tab per process run.
+# Avoids repeated open_by_key() + worksheet() read calls on every append.
+_worksheets: dict[str, gspread.Worksheet] = {}
+# Tracks which tabs have had their header row confirmed this session.
 _headers_confirmed: set = set()
+# Serializes Sheets API calls so concurrent enrichment threads don't race on
+# the initial open/header-check and exhaust the read quota.
+_sheets_lock = threading.Lock()
 
 
 def _get_gspread_client() -> gspread.Client:
@@ -152,28 +158,36 @@ def route_lead(lead_id: str, tier: str, notify: bool = True) -> bool:
 def _get_or_init_worksheet(tab: str, columns: list) -> gspread.Worksheet:
     """Return the worksheet for `tab`, creating it and writing the header if needed.
 
-    Header check is done at most once per tab per process run — subsequent calls
-    skip the `get_all_values()` read to stay within Google Sheets read quota.
+    The worksheet object and header confirmation are cached after the first call
+    per tab. Concurrent threads are serialized via _sheets_lock to prevent
+    simultaneous open_by_key() + get_all_values() calls from exhausting the
+    Google Sheets read quota (60 reads/min per user).
     """
-    global _headers_confirmed
-    gc = _get_gspread_client()
-    sh = gc.open_by_key(GOOGLE_SHEET_ID)
+    global _worksheets, _headers_confirmed
+    with _sheets_lock:
+        if tab in _worksheets:
+            return _worksheets[tab]
 
-    try:
-        ws = sh.worksheet(tab)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab, rows=5000, cols=len(columns))
+        gc = _get_gspread_client()
+        sh = gc.open_by_key(GOOGLE_SHEET_ID)
 
-    if tab not in _headers_confirmed:
-        existing = ws.get_all_values()
-        has_content = any(any(cell for cell in row) for row in existing)
-        has_header = has_content and existing[0] == columns
-        if not has_header:
-            if not has_content:
-                ws.append_row(columns, value_input_option="RAW")
-            else:
-                ws.insert_row(columns, index=1, value_input_option="RAW")
-        _headers_confirmed.add(tab)
+        try:
+            ws = sh.worksheet(tab)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=tab, rows=5000, cols=len(columns))
+
+        if tab not in _headers_confirmed:
+            existing = ws.get_all_values()
+            has_content = any(any(cell for cell in row) for row in existing)
+            has_header = has_content and existing[0] == columns
+            if not has_header:
+                if not has_content:
+                    ws.append_row(columns, value_input_option="RAW")
+                else:
+                    ws.insert_row(columns, index=1, value_input_option="RAW")
+            _headers_confirmed.add(tab)
+
+        _worksheets[tab] = ws
 
     return ws
 
