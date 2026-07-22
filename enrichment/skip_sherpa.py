@@ -308,10 +308,9 @@ def call_skip_sherpa_batch(lookups: list[dict]) -> list[dict] | None:
                 timeout=30,
             )
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", 60))
-                log.warning(f"Skip Sherpa rate limited — waiting {retry_after}s")
-                time.sleep(retry_after)
-                continue
+                # Daily/hourly quota exhausted — don't retry, fall through to Tracerfy immediately
+                log.warning(f"Skip Sherpa rate limited (429) — signalling provider_error to fall back to Tracerfy")
+                return None
             if resp.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
                 wait = 2 ** (attempt + 1)
                 log.warning(f"Skip Sherpa {resp.status_code} (attempt {attempt+1}/{_MAX_RETRIES}) — retrying in {wait}s")
